@@ -1,0 +1,78 @@
+name: iac-guard
+on:
+  pull_request:
+    branches: [main, "release/**"]
+permissions:
+  contents: read
+  security-events: write  # subir el SARIF a Code Scanning
+  pull-requests: read
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Umbral actual del gate: --fail-on medium. Lo decide el servidor: cámbialo en
+    # iac-guard (Integraciones) sin editar este archivo.
+    env:
+      API: ${{ secrets.IAC_GUARD_API_URL }}
+      TOKEN: ${{ secrets.IAC_GUARD_TOKEN }}
+      PROJECT: proj-f8b1f92d
+      IAC_PATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enviar el IaC a iac-guard
+        id: submit
+        run: |
+          set -euo pipefail
+          test -n "$API" -a -n "$TOKEN" || { echo "::error::Configura los secretos IAC_GUARD_API_URL e IAC_GUARD_TOKEN"; exit 3; }
+          find "$IAC_PATH" -type f \( -name '*.tf' -o -name '*.yaml' -o -name '*.yml' \) -not -path '*/.github/*' -not -path '*/.terraform/*' \
+            | head -500 | jq -R -s 'split("\n") | map(select(length > 0))' > paths.json
+          python3 - <<'PY'
+          import json, os
+          paths = json.load(open("paths.json"))
+          files = [{"path": p, "content": open(p, encoding="utf-8", errors="replace").read()} for p in paths]
+          body = {"projectId": os.environ["PROJECT"], "ref": os.environ.get("GITHUB_HEAD_REF") or "main",
+                  "commit": os.environ["GITHUB_SHA"], "useLlm": True, "triggeredBy": "ci", "files": files}
+          json.dump(body, open("body.json", "w"))
+          PY
+          JOB=$(curl -sS --fail-with-body -X POST "$API/v1/scans" -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" --data @body.json | jq -r .job_id)
+          echo "Análisis $JOB encolado ($(jq length paths.json) archivos IaC)"
+          echo "job=$JOB" >> "$GITHUB_OUTPUT"
+      - name: Esperar el análisis y decidir el gate
+        id: gate
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 180); do
+            GATE=$(curl -sS --fail-with-body "$API/v1/scans/${{ steps.submit.outputs.job }}/gate" -H "Authorization: Bearer $TOKEN")
+            DECISION=$(echo "$GATE" | jq -r .decision)
+            [ "$DECISION" != "pending" ] && break
+            sleep 10
+          done
+          echo "$GATE" | jq .
+          echo "decision=$DECISION" >> "$GITHUB_OUTPUT"
+          echo "exit=$(echo "$GATE" | jq -r '.exitCode // 3')" >> "$GITHUB_OUTPUT"
+          {
+            echo "## iac-guard: gate $(echo "$GATE" | jq -r '.decision | ascii_upcase') (umbral $(echo "$GATE" | jq -r .failOn))"
+            echo "$GATE" | jq -r '.blocking[]? | "- **\(.severity)** \(.ruleId) en `\(.resource)`: \(.title)"'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Descargar SARIF
+        if: always() && steps.submit.outputs.job != ''
+        run: |
+          curl -sS --fail-with-body "$API/v1/scans/${{ steps.submit.outputs.job }}/report?format=sarif" \
+            -H "Authorization: Bearer $TOKEN" -o results.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always() && hashFiles('results.sarif') != ''
+        with:
+          sarif_file: results.sarif
+          category: iac-guard
+      - name: Registrar la ejecución en el tablero
+        if: always() && steps.submit.outputs.job != ''
+        run: |
+          jq -n --arg project "$PROJECT" --arg scan "${{ steps.submit.outputs.job }}" \
+            --arg pr "#${{ github.event.pull_request.number }}" --arg branch "$GITHUB_HEAD_REF" --arg commit "${GITHUB_SHA:0:7}" \
+            --argjson exit "${{ steps.gate.outputs.exit || 3 }}" \
+            '{projectId: $project, scanId: $scan, pr: $pr, branch: $branch, commit: $commit, exitCode: $exit,
+              status: (if $exit == 0 then "passed" else "failed" end)}' \
+          | curl -sS -X POST "$API/v1/ci-runs" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" --data @- > /dev/null
+      - name: Aplicar el gate
+        run: exit ${{ steps.gate.outputs.exit || 3 }}
