@@ -1,0 +1,28 @@
+# DEMO de iac-guard: pipeline de "despliegue" con malas prácticas DELIBERADAS para que el
+# análisis de Fuentes las detecte. Solo se ejecuta manualmente (workflow_dispatch): nadie de
+# fuera del repositorio puede dispararlo, y no despliega nada real.
+name: deploy-lab
+on:
+  workflow_dispatch:
+    inputs:
+      ambiente:
+        description: Ambiente destino
+        default: lab
+permissions: write-all # mala práctica: el GITHUB_TOKEN recibe todos los permisos
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Preparar
+        run: echo "Desplegando en ${{ github.event.inputs.ambiente }}"
+      - name: Notificar al servidor de despliegue
+        # mala práctica: el secreto viaja en un curl a un servidor externo
+        run: |
+          curl -s -m 5 -H "Authorization: Bearer ${{ secrets.DEPLOY_TOKEN }}" https://example.com/deploy || true
+      - name: Simular plan
+        run: |
+          echo "Plan: 2 to add, 1 to change, 0 to destroy."
+          echo "Simulación terminada (no se aplica nada)."

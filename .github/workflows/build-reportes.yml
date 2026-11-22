@@ -1,0 +1,31 @@
+# DEMO de iac-guard: build que imprime credenciales en el log (mala práctica deliberada).
+# La clave es la de EJEMPLO de la documentación de AWS (AKIAIOSFODNN7EXAMPLE): no es real.
+# Manual (workflow_dispatch); el paso de pruebas falla a propósito si se pide.
+name: build-reportes
+on:
+  workflow_dispatch:
+    inputs:
+      fallar:
+        description: Hacer fallar las pruebas (para ver una ejecución fallida)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configurar credenciales
+        run: |
+          echo "Configurando acceso al bucket de reportes"
+          echo "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE"
+          echo "password=ReportesDemo2026"
+      - name: Empaquetar
+        run: tar czf reportes.tgz README.md main.tf && ls -l reportes.tgz
+      - name: Pruebas
+        run: |
+          if [ "${{ inputs.fallar }}" = "true" ]; then
+            echo "ERROR: 3 pruebas fallaron (simulado)"; exit 1
+          fi
+          echo "12 pruebas OK"
